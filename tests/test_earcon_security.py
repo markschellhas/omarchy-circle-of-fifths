@@ -3,8 +3,11 @@
 
 import importlib.util
 import os
+import shlex
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -160,6 +163,103 @@ class BarWidgetGuardTests(unittest.TestCase):
         self.assertNotIn("handlePopupFile", text)
         self.assertIn("--watch", text)
         self.assertEqual(text.count("Process {"), 1)
+
+
+class LiveWatchTests(unittest.TestCase):
+    def test_live_flood_stays_on_one_python_worker(self):
+        if not shutil_which("inotifywait"):
+            self.skipTest("inotifywait not installed")
+
+        fakebin = tempfile.TemporaryDirectory()
+        notify = tempfile.TemporaryDirectory()
+        play_log = os.path.join(fakebin.name, "plays.log")
+        Path(fakebin.name, "pw-play").write_text(
+            "#!/bin/sh\nprintf 'play\\n' >> %s\n" % json_quote_path(play_log),
+            encoding="utf-8",
+        )
+        os.chmod(os.path.join(fakebin.name, "pw-play"), 0o755)
+        env = os.environ.copy()
+        env["PATH"] = fakebin.name + os.pathsep + env.get("PATH", "")
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "play-triad.py"), "--watch", "0", notify.name],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            time.sleep(0.35)
+            self.assertIsNone(proc.poll(), "watch worker exited early")
+            for i in range(200):
+                path = os.path.join(notify.name, "n%03d.json" % i)
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write('{"urgency":1,"n":%d}' % i)
+                extras = extra_play_triad_workers(proc.pid)
+                self.assertEqual(extras, [], extras)
+            time.sleep(1.0)
+            extras = extra_play_triad_workers(proc.pid)
+            self.assertEqual(extras, [], extras)
+            self.assertIsNone(proc.poll())
+            plays = play_count(play_log)
+            self.assertGreaterEqual(plays, 1)
+            self.assertLessEqual(plays, 8)
+
+            before = plays
+            huge = os.path.join(notify.name, "huge.json")
+            with open(huge, "wb") as handle:
+                handle.write(b'{"urgency":1,"pad":"' + b"x" * 20000 + b'"}')
+            time.sleep(0.7)
+            self.assertEqual(play_count(play_log), before)
+
+            with open(os.path.join(notify.name, "ok.json"), "w", encoding="utf-8") as handle:
+                handle.write('{"urgency":2}')
+            deadline = time.time() + 2.0
+            while time.time() < deadline and play_count(play_log) < before + 1:
+                time.sleep(0.05)
+            self.assertEqual(play_count(play_log), before + 1)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            fakebin.cleanup()
+            notify.cleanup()
+
+
+def shutil_which(name):
+    return shutil.which(name)
+
+
+def json_quote_path(path):
+    return shlex.quote(path)
+
+
+def play_count(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except FileNotFoundError:
+        return 0
+
+
+def extra_play_triad_workers(watch_pid):
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    extras = []
+    for line in out.splitlines():
+        line = line.strip()
+        if "play-triad.py" not in line:
+            continue
+        pid_s, args = line.split(None, 1)
+        pid = int(pid_s)
+        if pid == watch_pid:
+            continue
+        if "--watch" in args or "--earcon" in args:
+            extras.append((pid, args))
+    return extras
 
 
 class UsageTests(unittest.TestCase):
