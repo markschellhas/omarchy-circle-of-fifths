@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.markschellhas.circle-of-fifths",
+  "name": "Circle of Fifths",
+  "version": "0.4.0",
+  "author": "Mark Schellhas",
+  "license": "MIT",
+  "description": "Bar widget and panel for picking a key on the circle of fifths.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Circle of Fifths",
+    "category": "Music",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "tonicIndex": 0,
+      "earcons": false
+    },
+    "schema": [
+      {
+        "key": "tonicIndex",
+        "type": "int",
+        "label": "Tonic index on the circle (C=0)"
+      },
+      {
+        "key": "earcons",
+        "type": "boolean",
+        "label": "Tune this PC: notification sounds in the selected key",
+        "defaultValue": false
+      }
+    ]
+  }
+}
