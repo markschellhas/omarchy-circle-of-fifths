@@ -4,7 +4,7 @@ Bar widget that opens a key picker on the circle of fifths.
 
 Plugin id: `io.github.markschellhas.circle-of-fifths`
 
-![Circle of fifths panel](screenshot.png)
+![Circle of fifths panel](preview.png)
 
 ## Install
 
