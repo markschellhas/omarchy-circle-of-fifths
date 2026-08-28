@@ -111,17 +111,9 @@ BarWidget {
       root.bar.shell.updateEntryInline(root.moduleName, entry)
   }
 
-  function handlePopupFile(name) {
-    name = String(name || "").replace(/^\s+|\s+$/g, "")
-    if (name.length < 6 || name.indexOf(".json") !== name.length - 5)
-      return
-    if (name.indexOf("/") !== -1 || name.indexOf("..") !== -1)
-      return
-    Quickshell.execDetached([
-      "python3", root.playScript, "--earcon",
-      String(root.tonicIndex),
-      root.popupDir + "/" + name
-    ])
+  function bounceWatch() {
+    if (popupWatch.running)
+      popupWatch.running = false
   }
 
   implicitWidth: button.implicitWidth
@@ -145,6 +137,7 @@ BarWidget {
     if (panelLoader.item)
       panelLoader.item.tonicIndex = root.tonicIndex
     root.persistSoon()
+    root.bounceWatch()
   }
   onEarconsChanged: {
     if (panelLoader.item)
@@ -162,13 +155,9 @@ BarWidget {
     id: popupWatch
     running: root.earcons
     command: [
-      "bash", "-c",
-      "mkdir -p \"$1\" && exec inotifywait -m -q -e close_write --format '%f' \"$1\"",
-      "--", root.popupDir
+      "python3", root.playScript, "--watch",
+      String(root.tonicIndex), root.popupDir
     ]
-    stdout: SplitParser {
-      onRead: function(line) { root.handlePopupFile(line) }
-    }
     onExited: {
       if (root.earcons)
         restartWatch.restart()
