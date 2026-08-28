@@ -257,7 +257,16 @@ def extra_play_triad_workers(watch_pid):
         pid = int(pid_s)
         if pid == watch_pid:
             continue
-        if "--watch" in args or "--earcon" in args:
+        parts = args.split()
+        interp = os.path.basename(parts[0]) if parts else ""
+        if not interp.startswith("python"):
+            continue
+        try:
+            script_at = next(i for i, part in enumerate(parts) if part.endswith("play-triad.py"))
+        except StopIteration:
+            continue
+        mode = parts[script_at + 1] if script_at + 1 < len(parts) else ""
+        if mode in ("--watch", "--earcon"):
             extras.append((pid, args))
     return extras
 
