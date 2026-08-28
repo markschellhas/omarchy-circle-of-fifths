@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Placeholder sine-triad player. Args: hz1 hz2 hz3 [seconds]."""
 
+import errno
 import json
 import math
 import os
+import select
 import shutil
+import stat
 import struct
 import subprocess
 import sys
@@ -81,6 +84,8 @@ def play(path):
 PITCH_CLASS = [0, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10, 5]
 EARCON_SECONDS = 0.42
 EARCON_AMPLITUDE = 0.14
+WATCH_DEBOUNCE = 0.22
+MAX_NOTIFICATION_BYTES = 16 * 1024
 
 
 def wrap12(index):
@@ -118,21 +123,73 @@ def earcon_hz(tonic, urgency):
     return triad_hz(t, False)
 
 
-def debounce_ok(wait=0.22):
-    stamp = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "cof-earcon.stamp")
-    now = time.time()
-    try:
-        prev = float(open(stamp, encoding="utf-8").read().strip())
-        if now - prev < wait:
-            return False
-    except (OSError, ValueError):
-        pass
-    try:
-        with open(stamp, "w", encoding="utf-8") as handle:
-            handle.write(str(now))
-    except OSError:
-        pass
+def notification_name_ok(name):
+    name = str(name or "").strip()
+    if len(name) < 6 or not name.endswith(".json"):
+        return False
+    if "/" in name or name in (".", "..") or ".." in name:
+        return False
     return True
+
+
+def open_notification_fd(path):
+    return os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+
+
+def read_notification_json(path, max_bytes=MAX_NOTIFICATION_BYTES):
+    fd = open_notification_fd(path)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "notification is not a regular file")
+        if info.st_size > max_bytes:
+            raise OSError(errno.EFBIG, "notification exceeds size cap")
+        chunks = []
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > max_bytes:
+            raise OSError(errno.EFBIG, "notification exceeds size cap")
+    finally:
+        os.close(fd)
+    parsed = json.loads(data.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("notification JSON must be an object")
+    return parsed
+
+
+def notification_urgency(path):
+    try:
+        return read_notification_json(path).get("urgency", 1)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError, AttributeError):
+        return None
+
+
+def coalesced_lines(stream, debounce=WATCH_DEBOUNCE):
+    """Yield the latest line from each burst, after a quiet period."""
+    while True:
+        line = stream.readline()
+        if not line:
+            return
+        deadline = time.monotonic() + debounce
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            ready, _, _ = select.select([stream], [], [], remaining)
+            if not ready:
+                break
+            extra = stream.readline()
+            if not extra:
+                yield line
+                return
+            line = extra
+        yield line
 
 
 def play_freqs(freqs, seconds, amplitude=AMPLITUDE):
@@ -155,26 +212,68 @@ def play_freqs(freqs, seconds, amplitude=AMPLITUDE):
             pass
 
 
+def play_earcon(tonic, path):
+    urgency = notification_urgency(path)
+    if urgency is None:
+        return
+    play_freqs(earcon_hz(tonic, urgency), EARCON_SECONDS, EARCON_AMPLITUDE)
+
+
 def earcon_main(argv):
     if len(argv) < 2:
         sys.stderr.write("usage: play-triad.py --earcon tonicIndex jsonPath\n")
         sys.exit(2)
-    if not debounce_ok():
-        return
-    path = argv[1]
-    urgency = 1
+    play_earcon(argv[0], argv[1])
+
+
+def watch_main(argv):
+    if len(argv) < 2:
+        sys.stderr.write("usage: play-triad.py --watch tonicIndex notifyDir\n")
+        sys.exit(2)
+    tonic, directory = argv[0], argv[1]
+    if not directory or "\x00" in directory:
+        sys.stderr.write("play-triad: invalid notification directory\n")
+        sys.exit(2)
     try:
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-        urgency = data.get("urgency", 1)
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
-    play_freqs(earcon_hz(argv[0], urgency), EARCON_SECONDS, EARCON_AMPLITUDE)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+    except OSError as exc:
+        sys.stderr.write("play-triad: cannot create %s: %s\n" % (directory, exc))
+        sys.exit(1)
+    try:
+        proc = subprocess.Popen(
+            ["inotifywait", "-m", "-q", "-e", "close_write", "--format", "%f", directory],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        sys.stderr.write("play-triad: inotifywait not found\n")
+        sys.exit(1)
+    try:
+        for raw in coalesced_lines(proc.stdout):
+            name = raw.decode("utf-8", "replace").strip()
+            if not notification_name_ok(name):
+                continue
+            play_earcon(tonic, os.path.join(directory, name))
+    finally:
+        if proc.stdout:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def main(argv):
     if argv and argv[0] == "--earcon":
         earcon_main(argv[1:])
+        return
+    if argv and argv[0] == "--watch":
+        watch_main(argv[1:])
         return
     if len(argv) < 3:
         sys.stderr.write("usage: play-triad.py hz1 hz2 hz3 [seconds]\n")
